@@ -1,0 +1,20 @@
+{
+  "artifact": "rc_divider",
+  "path": "cir_confession",
+  "stamp": {
+    "engine": "hand-written-fixture",
+    "contract": "WyredSpiceContract (draft)"
+  },
+  "modelled": {
+    "R1": "R",
+    "R2": "R",
+    "RLOAD": "R",
+    "VVIN": "V"
+  },
+  "not_simulated": [],
+  "node_map": {
+    "+12V": "P12V",
+    "+3V3": "P3V3",
+    "GND": "0"
+  }
+}

@@ -50,7 +50,22 @@
                                  probe must have fired at least once
                                  this run or the run FAILS — "all codes
                                  negatively probed" is a per-run
-                                 mechanical fact, not a claim.
+                                 mechanical fact, not a claim;
+                              6. the SPICE DC operating-point oracle
+                                 (WyredPlanSpice 2.2): for every artifact
+                                 carrying a ``.cir`` deck, ngspice (reached
+                                 only as a subprocess, via the harness
+                                 ``spice_run`` runner) computes the DC
+                                 operating point and each declared power
+                                 rail must sit within its declared
+                                 tolerance (±2 % default, ``sim_tol_pct``
+                                 override) of the simulated node voltage
+                                 (``SPICE_RAIL_OFF`` / ``SPICE_RAIL_UNRESOLVED``).
+                                 ngspice absent -> a LOUD SKIP naming every
+                                 unverified rail (never green-by-omission,
+                                 never a failure); ``.cir`` absent -> stage
+                                 not applicable (Phase-1 gating made deck
+                                 absence honest).
 
 Exit 0 iff every check passed AND the battery fully fired.
 
@@ -103,6 +118,8 @@ import invariant as invariant_oracle        # noqa: E402
 import schema                               # noqa: E402
 import schema_l1                            # noqa: E402
 import spec_satisfaction                    # noqa: E402
+import spice_oracle                         # noqa: E402  (SPICE op-oracle, 2.2)
+import spice_run                            # noqa: E402  (ngspice by subprocess)
 
 DEFAULT_ENGINE_SRC = HERE.parents[1] / "wyred" / "src"
 
@@ -229,6 +246,116 @@ def _crosscheck_doctored(engine_src, corpus_dir, probe_root: Path,
         (d / ("%s.%s.json" % (name, kind))).write_text(json.dumps(obj))
     _rc, fails = _crosscheck_subprocess(engine_src, corpus_dir, d, name)
     return {f["code"] for f in fails}
+
+
+def _crosscheck_doctored_cir(engine_src, corpus_dir, probe_root: Path,
+                             name: str, clean_set: dict, deck_text: str,
+                             sidecar: dict):
+    """Write a CLEAN artifact quintuple plus a DOCTORED ``.cir`` deck + its
+    ``.cir.json`` sidecar as a fresh set under the probe temp dir (never the
+    input tree) and re-run the engine's from-disk differential over it; ->
+    the set of codes that fired. The non-spice paths stay clean, so only the
+    ``XCIR_*`` codes can fire — the same isolation the XPATH battery relies
+    on. (WyredPlanSpice 1.3.)"""
+    d = probe_root / ("cir_probe_%03d" % next(_PROBE_SEQ))
+    d.mkdir(parents=True)
+    for kind, obj in clean_set.items():
+        (d / ("%s.%s.json" % (name, kind))).write_text(json.dumps(obj))
+    (d / ("%s.cir" % name)).write_text(deck_text)
+    (d / ("%s.cir.json" % name)).write_text(json.dumps(sidecar))
+    _rc, fails = _crosscheck_subprocess(engine_src, corpus_dir, d, name)
+    return {f["code"] for f in fails}
+
+
+# ---------------------------------------------------------------------------
+# the SPICE deck counter-probe battery (WyredPlanSpice step 1.3): the XCIR_*
+# analogue of the XPATH battery. Each probe doctors ONE aspect of a clean
+# ``.cir`` deck / ``.cir.json`` sidecar and names the code the SPICE structural
+# oracle MUST fire; they JOIN the same lobotomy verdict (every probe fires
+# every run, or the run fails — applicability conditioned on corpus content is
+# exactly the hole the verdict closes, so a spice-modelled artifact must always
+# be present). A mutator returns True when it applied, False to skip. It edits
+# the deck LINE LIST and/or the sidecar dict in place.
+# ---------------------------------------------------------------------------
+
+def _xcir_probe_battery():
+    """The committed NEGATIVE-probe battery for the ``.cir`` structural oracle
+    (WyredSpiceContract §10). Four probes, one per code — a dropped element, a
+    rewired node, a rewritten value, a forged confession — each isolated so it
+    fires its code and no other (verified in wyred-harness/tests)."""
+
+    def _element_card_indices(deck):
+        """Indices of the deck lines that are element cards (not comments, dot
+        cards, continuations, or inside a ``.subckt`` definition body)."""
+        idxs = []
+        in_subckt = False
+        for i, ln in enumerate(deck):
+            s = ln.strip()
+            if not s or s.startswith("*") or s.startswith("+"):
+                continue
+            if s.startswith("."):
+                low = s.split()[0].lower()
+                if low == ".subckt":
+                    in_subckt = True
+                elif low == ".ends":
+                    in_subckt = False
+                continue
+            if in_subckt:
+                continue
+            idxs.append(i)
+        return idxs
+
+    def cir_element_dropped(deck, sidecar, l2):
+        """Drop one element card -> its refdes vanishes from the deck while the
+        L2 still models it and the confession does not name it -> the deck's
+        refdes set is short one unconfessed part (XCIR_COMPONENTS)."""
+        idxs = _element_card_indices(deck)
+        if not idxs:
+            return False
+        del deck[idxs[0]]
+        return True
+
+    def cir_node_rewired(deck, sidecar, l2):
+        """Rewire ONE node of one element to ground (``0``) -> that terminal
+        leaves its L2 net and joins the ground class -> the deck node partition
+        no longer matches the L2 net partition (XCIR_NET_PARTITION)."""
+        for i in _element_card_indices(deck):
+            toks = deck[i].split()
+            for j in (1, 2):                     # the two node slots (v0 2-term)
+                if j < len(toks) and toks[j] != "0":
+                    toks[j] = "0"
+                    deck[i] = " ".join(toks)
+                    return True
+        return False
+
+    def cir_value_rewritten(deck, sidecar, l2):
+        """Rewrite the value token of one primitive element -> the deck value
+        no longer matches the L2 model's canonicalized value for that
+        component's kind (XCIR_ELEMENT)."""
+        for i in _element_card_indices(deck):
+            toks = deck[i].split()
+            if toks and toks[0][:1].upper() in "RCLDVI" and len(toks) >= 4:
+                toks[-1] = "TAMPERV"
+                deck[i] = " ".join(toks)
+                return True
+        return False
+
+    def cir_confession_forged(deck, sidecar, l2):
+        """Forge a not_simulated entry for a part that is NOT in the L2 -> the
+        confession claims a component was unmodelled that the L2 never had
+        (a forged/stale confession, XCIR_CONFESSION). A refdes absent from the
+        L2 keeps XCIR_COMPONENTS silent (expected deck set unchanged), so the
+        probe isolates the confession code."""
+        sidecar.setdefault("not_simulated", []).append(
+            {"refdes": "PHANTOM_NS", "kind": "asic", "reason": "no_model"})
+        return True
+
+    return [
+        ("cir_element_dropped",   "XCIR_COMPONENTS",    cir_element_dropped),
+        ("cir_node_rewired",      "XCIR_NET_PARTITION", cir_node_rewired),
+        ("cir_value_rewritten",   "XCIR_ELEMENT",       cir_value_rewritten),
+        ("cir_confession_forged", "XCIR_CONFESSION",    cir_confession_forged),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +614,107 @@ def _xpath_probe_battery():
 
 
 # ---------------------------------------------------------------------------
+# the SPICE DC operating-point oracle (WyredPlanSpice step 2.2)
+# ---------------------------------------------------------------------------
+# For every emitted artifact carrying a ``.cir`` deck, delegate the DC
+# operating point to ngspice (via the harness ``spice_run`` runner — the engine
+# is never imported, ngspice is never imported, both are reached only as
+# subprocesses) and require each declared power rail to sit within its declared
+# tolerance of the simulated node voltage (``spice_oracle.check_rails`` ->
+# ``SPICE_RAIL_OFF`` / ``SPICE_RAIL_UNRESOLVED``). Gate-wiring discipline
+# (WyredPlanSpice ground rules): ``.cir`` absent -> stage not applicable
+# (Phase-1 gating already made deck absence honest); ngspice absent -> a LOUD
+# SKIP naming every deck and every declared rail NOT verified (never a silent
+# green, never a failure); a broken run (timeout/crash/unparseable) is
+# spice_run's STRUCTURED FAILURE, red — never laundered into a skip.
+# ---------------------------------------------------------------------------
+
+def _print_spice_skip_banner(tree: Path, decks: list) -> None:
+    """The loud SKIP banner for the SPICE op-oracle (the run_gate
+    ``_skip_probes_warning`` shape): names every deck NOT simulated and every
+    declared rail NOT verified, so an absent ngspice can never read as a silent
+    green."""
+    bang = "!" * 72
+    print(bang)
+    print("!!! SKIPPED: SPICE DC operating-point vs declared-rails oracle")
+    print("!!! ngspice was NOT found (PATH / %s)." % spice_run.NGSPICE_ENV)
+    print("!!! The decks below are structurally present and gate-clean, but")
+    print("!!! their DC operating points were NOT computed and these declared")
+    print("!!! rails were NOT checked against simulation:")
+    for name in decks:
+        try:
+            l2 = _read_json(tree, name, "l2")
+        except (OSError, ValueError):
+            l2 = {"nets": []}
+        rails = spice_oracle.declared_power_rails(l2)
+        print("!!!   - %s.cir" % name)
+        if rails:
+            for r in rails:
+                print("!!!       rail %s = %gV +/-%g%% NOT VERIFIED"
+                      % (r["name"], float(r["voltage"]),
+                         spice_oracle.rail_tol_pct(r)))
+        else:
+            print("!!!       (no declared power rails)")
+    print("!!! Install ngspice (brew install ngspice) or set %s to a binary "
+          "to verify." % spice_run.NGSPICE_ENV)
+    print(bang, flush=True)
+
+
+def _spice_op_stage(tree: Path, gate_names: list, work_dir: Path) -> int:
+    """Run the SPICE DC operating-point oracle over every gated artifact that
+    carries a ``.cir`` deck. Returns a failure count (0 on a loud skip)."""
+    print("\n== gate: SPICE DC operating point vs declared rails "
+          "(ngspice, when a .cir exists) ==")
+    decks = [n for n in gate_names if (tree / ("%s.cir" % n)).is_file()]
+    if not decks:
+        print("     no .cir deck in the tree; SPICE op-oracle not applicable")
+        return 0
+
+    binary = spice_run.find_ngspice()
+    if binary is None:
+        _print_spice_skip_banner(tree, decks)
+        return 0
+
+    spice_run.print_version_pin(binary, spice_run.probe_version(binary))
+    failures = 0
+    op_root = work_dir / "spiceop"
+    for name in decks:
+        deck = tree / ("%s.cir" % name)
+        sidecar = _read_json(tree, name, "cir")
+        l2 = _read_json(tree, name, "l2")
+        result = spice_run.run_op(deck, ngspice=binary,
+                                  work_dir=op_root / name)
+        if result.status == spice_run.STATUS_SKIP:
+            # ngspice vanished between discovery and this run — treat as skip,
+            # never a silent pass.
+            _print_spice_skip_banner(tree, [name])
+            continue
+        if result.status == spice_run.STATUS_FAIL:
+            failures += 1
+            print("FAIL %-28s SPICE run failed (%s): %s"
+                  % (name, result.error_kind, result.error))
+            continue
+
+        record = result.to_record()
+        findings = spice_oracle.check_rails(l2, sidecar, record)
+        meas = spice_oracle.rail_measurements(l2, sidecar, record)
+        if findings:
+            failures += 1
+            print("FAIL %-28s SPICE op-oracle: %d rail finding(s)"
+                  % (name, len(findings)))
+            for f in findings:
+                print("       spice: %s: %s" % (f.code, f.msg))
+        else:
+            summary = ", ".join(
+                "%s=%sV" % (m["net"], ("%.6g" % m["simulated"])
+                            if m["simulated"] is not None else "?")
+                for m in meas)
+            print("PASS %-28s SPICE op-oracle: %d rail(s) on-rail%s"
+                  % (name, len(meas), (" (%s)" % summary) if summary else ""))
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # the gate
 # ---------------------------------------------------------------------------
 
@@ -550,6 +778,8 @@ def run_gate(tree: Path, corpus_dir: Path, engine_src: Path,
     gate_names = [n for n in order if n in set(tree_names)]
 
     battery = _xpath_probe_battery()
+    cir_battery = _xcir_probe_battery()
+    all_probes = battery + cir_battery
     xprobe_fired = {}             # probe id -> artifact it fired on
     probe_root = work_dir / "probes"
 
@@ -626,6 +856,37 @@ def run_gate(tree: Path, corpus_dir: Path, engine_src: Path,
                               "but %s did NOT fire (fired: %s)"
                               % (name, probe_id, want_code,
                                  sorted(fired) or "[]"))
+
+                # the SPICE deck battery (WyredPlanSpice 1.3): where the emit
+                # wrote a ``.cir`` for this artifact, prove every XCIR_* code
+                # fires on a doctored COPY of the clean deck + sidecar (written
+                # under the temp dir — never the input tree). Same once-per-run
+                # accounting and lobotomy verdict as the XPATH battery.
+                if (tree / ("%s.cir" % name)).exists():
+                    clean_deck = (tree / ("%s.cir" % name)).read_text()
+                    clean_side = _read_json(tree, name, "cir")
+                    clean_set = {"l2": clean[0], "bom": clean[1],
+                                 "pinmap": clean[2], "records": clean[3],
+                                 "l1": clean[4]}
+                    for probe_id, want_code, mutate in cir_battery:
+                        if probe_id in xprobe_fired:
+                            continue
+                        deck_lines = clean_deck.splitlines()
+                        side = copy.deepcopy(clean_side)
+                        if not mutate(deck_lines, side, clean[0]):
+                            continue        # precondition unmet here; try later
+                        doctored = "\n".join(deck_lines) + "\n"
+                        fired = _crosscheck_doctored_cir(
+                            engine_src, corpus_dir, probe_root, name,
+                            clean_set, doctored, side)
+                        if want_code in fired:
+                            xprobe_fired[probe_id] = name
+                        else:
+                            failures += 1
+                            print("FAIL %-28s spice counter-probe %r applied "
+                                  "but %s did NOT fire (fired: %s)"
+                                  % (name, probe_id, want_code,
+                                     sorted(fired) or "[]"))
 
             # ---- the v3 stack, every input re-read from disk -------------
             doc_obj = schema_l1.from_json(l1)
@@ -725,21 +986,30 @@ def run_gate(tree: Path, corpus_dir: Path, engine_src: Path,
                   % ("present" if esc_ok else "MISSING"))
 
     # the battery verdict: every probe must have fired SOMEWHERE this run.
-    unfired = [(pid, code) for pid, code, _ in battery
+    # The XPATH cross-path probes and the WyredPlanSpice 1.3 XCIR deck probes
+    # share ONE lobotomy verdict — a spice-modelled artifact that stops
+    # emitting (or a blanked check) leaves an XCIR probe unfired and turns the
+    # run red, exactly as a removed board module does for a connector probe.
+    unfired = [(pid, code) for pid, code, _ in all_probes
                if pid not in xprobe_fired]
     if unfired:
         failures += 1
-        print("\nFAIL xpath counter-probe battery: %d/%d probe(s) never "
-              "found an applicable artifact or never fired:"
-              % (len(unfired), len(battery)))
+        print("\nFAIL cross-path + spice counter-probe battery: %d/%d "
+              "probe(s) never found an applicable artifact or never fired:"
+              % (len(unfired), len(all_probes)))
         for pid, code in unfired:
             print("       %s (expects %s)" % (pid, code))
     else:
-        codes = sorted({code for _, code, _ in battery})
-        print("\nPASS xpath counter-probe battery: %d/%d probes fired "
-              "(%d codes negatively probed: %s)"
-              % (len(xprobe_fired), len(battery), len(codes),
+        codes = sorted({code for _, code, _ in all_probes})
+        print("\nPASS cross-path + spice counter-probe battery: %d/%d probes "
+              "fired (%d codes negatively probed: %s)"
+              % (len(xprobe_fired), len(all_probes), len(codes),
                  ", ".join(codes)))
+
+    # the SPICE DC operating-point oracle (WyredPlanSpice 2.2): gate-wired for
+    # every artifact with a ``.cir``; ngspice absent -> loud skip (never a
+    # failure), so a machine without a simulator still gates green.
+    failures += _spice_op_stage(tree, gate_names, work_dir)
     return len(gate_names), failures
 
 

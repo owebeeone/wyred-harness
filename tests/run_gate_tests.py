@@ -8,8 +8,9 @@
                               headline verdicts in BOTH directions:
 
     1. CLEAN       the examples corpus emits and the gate passes it,
-                   with the full "26/26 probes fired" battery line —
-                   the everything-green baseline;
+                   with the full "30/30 probes fired" battery line —
+                   the everything-green baseline (26 XPATH cross-path
+                   probes + 4 XCIR spice-deck probes, WyredPlanSpice 1.3);
     2. F4          the committed fixture corpus (tests/fixtures/
                    f4_corpus/) declares a clean layer 1 that actually
                    carries an address collision. The ENGINE trusts the
@@ -71,9 +72,16 @@ F4_FIXTURE = HERE / "fixtures" / "f4_corpus"
 
 # the board-encoding modules whose removal leaves a corpus with NO
 # connector artifacts (nothing else in the examples corpus references
-# them) — the applicability half of the lobotomy verdict must then fire
+# them) — the applicability half of the lobotomy verdict must then fire.
+# watchy_v1_bench.py is a bench REFINEMENT of watchy_v1 (``from
+# corpus.watchy_v1 import Watchy``), so it must be dropped alongside its
+# base or the reduced corpus fails to import; a skip entry for a module
+# not present is harmless. intent_10_spice_divider stays IN the reduced
+# corpus on purpose — its ``.cir`` keeps the four XCIR spice probes
+# applicable, so ONLY the five connector probes go unfired (the verdict
+# test asserts exactly that one failure).
 BOARD_MODULES = ("lib_watchy.py", "lib_mppt.py",
-                 "watchy_v1.py", "mppt_2420_hc.py")
+                 "watchy_v1.py", "watchy_v1_bench.py", "mppt_2420_hc.py")
 CONNECTOR_PROBES = ("connector_row_rewritten", "connector_row_dropped",
                     "connector_lock_stripped", "connector_lock_forged",
                     "connector_function_rewritten")
@@ -138,7 +146,7 @@ def test_1_clean(tmp: Path, cwd: Path) -> Path | None:
 
     Returns the emitted tree (test 4 doctors a copy of it), or None if
     the emit itself failed."""
-    print("[1/4] CLEAN: examples corpus emits; gate passes with 26/26")
+    print("[1/4] CLEAN: examples corpus emits; gate passes with 30/30")
     out = tmp / "clean_out"
     proc = emit(EXAMPLES_CORPUS, out, cwd)
     if not check(proc.returncode == 0,
@@ -149,8 +157,8 @@ def test_1_clean(tmp: Path, cwd: Path) -> Path | None:
     proc = gate(out, EXAMPLES_CORPUS, cwd)
     ok = check(proc.returncode == 0,
                "gate over clean tree exits 0 (got %d)" % proc.returncode)
-    check("26/26 probes fired" in proc.stdout,
-          'gate output has the "26/26 probes fired" battery line')
+    check("30/30 probes fired" in proc.stdout,
+          'gate output has the "30/30 probes fired" battery line')
     check("\nRESULT: PASS" in proc.stdout, "gate output has RESULT: PASS")
     if not ok:
         print(proc.stdout[-3000:] + proc.stderr[-1000:])

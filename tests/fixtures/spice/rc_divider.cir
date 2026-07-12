@@ -1,0 +1,18 @@
+* wyred SPICE denotation (hand-written fixture; WyredPlanSpice step 2.1)
+* engine: hand-written-fixture  contract: WyredSpiceContract (draft)
+* not_simulated: 0 (see rc_divider.cir.json)
+* net map: +12V -> P12V ; +3V3 -> P3V3 ; GND -> 0
+*
+* Source + resistive divider + load, fully auto-map-modelled (contract
+* WyredSpiceContract §2 passives table: kind resistor -> R, value verbatim;
+* §3 name-preserving sanitized nodes, +12V->P12V, +3V3->P3V3, ground->0).
+*
+* Analytically-known DC operating point:
+*   R2 (6.6k, P3V3->0) || RLOAD (6.6k, P3V3->0) = 3.3k to ground.
+*   V(P3V3) = 12 * 3.3k / (R1 8.7k + 3.3k) = 12 * 3.3/12.0 = 3.3 V exactly.
+*   V(P12V) = 12 V ; I(VVIN) = 12 / 12k = 1 mA (source branch = -1e-3 A).
+VVIN P12V 0 DC 12
+R1 P12V P3V3 8.7k
+R2 P3V3 0 6.6k
+RLOAD P3V3 0 6.6k
+.end

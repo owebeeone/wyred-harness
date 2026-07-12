@@ -638,6 +638,18 @@ if __name__ == "__main__":  # pragma: no cover
         biggest = max(g.nets, key=lambda n: len(n.nodes))
         print("  largest net: %s (%d pads)" % (biggest.name, len(biggest.nodes)))
 
+    # -- 3. GEOMETRY extension smoke (WyredPlanPlacement step 2.1) -----------
+    # The placement-geometry extractor (pcb_geometry.py) rides on THIS
+    # module's s-expression parser. Exercising its shared smoke here keeps the
+    # new synthetic-dialect + real-board (Watchy/MPPT) geometry checks inside
+    # the pcb_extract smoke entry point, as the step 2.1 acceptance requires,
+    # while leaving every connectivity check above untouched. Imported inside
+    # __main__ so the module-level pcb_extract<-pcb_geometry import stays one
+    # way (additive-only: pcb_extract never depends on pcb_geometry at load).
+    print()
+    from pcb_geometry import run_geometry_smoke
+    run_geometry_smoke(check)
+
     print()
     if failures:
         print("pcb_extract smoke test: FAIL (%d): %s"
